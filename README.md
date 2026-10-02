@@ -4,9 +4,8 @@ Herramienta de descubrimiento de superficie de ataque. Le das un dominio y encad
 
 1. `subfinder` saca los subdominios del dominio.
 2. `httpx` comprueba cuáles responden y descarta los que redirigen a un host que ya estaba en la lista.
-3. Dorking con DuckDuckGo (`site:host`) sobre cada host vivo para sacar rutas indexadas.
-4. `waybackurls` saca endpoints históricos de los hosts vivos. Solo se ejecuta si pasas la flag `--wayback`.
-5. `httpx` valida todos los endpoints recogidos y deja solo los que siguen activos.
+3. `waybackurls` saca endpoints históricos y `httpx` los valida. Solo se ejecuta si pasas la flag `--wayback`.
+4. Genera una lista de dorks de Google listos para pegar en el buscador, basados en el dominio y los subdominios descubiertos.
 
 El progreso se guarda por dominio, así que si cancelas con Ctrl+C y vuelves a lanzarlo sobre el mismo dominio continúa donde lo dejó.
 
@@ -14,13 +13,7 @@ El progreso se guarda por dominio, así que si cancelas con Ctrl+C y vuelves a l
 
 Herramientas externas en el PATH (o en `~/go/bin`): `subfinder`, `httpx` y `waybackurls`.
 
-Dependencia de Python (para el dorking):
-
-```
-pip install -r requirements.txt
-```
-
-Python 3.8 o superior.
+Python 3.8 o superior. No necesita paquetes de Python, solo la librería estándar.
 
 ## Uso
 
@@ -49,11 +42,8 @@ Los resultados se guardan en `output/dominio.com/` junto al propio script.
 | `--sf-maxtime` | Minutos máximos para subfinder | `5` |
 | `--sf-timeout` | Segundos de espera por fuente en subfinder | `10` |
 | `--no-all` | No usar la opción `-all` de subfinder (más rápido, menos fuentes) | off |
-| `--wayback` | Ejecutar también waybackurls | off |
-| `--dork-max` | Máximo de resultados por host en el dorking | `50` |
-| `--dork-pause` | Segundos de espera entre consultas a DuckDuckGo | `2.0` |
-| `--dork-region` | Región de búsqueda de DuckDuckGo | `wt-wt` |
-| `--dork-max-fails` | Fallos seguidos tras los que se aborta el dorking (rate limit) | `5` |
+| `--wayback` | Ejecutar también waybackurls y validarlos con httpx | off |
+| `--dork-exclude-limit` | Máximo de subdominios a excluir en el dork de descubrimiento | `25` |
 | `--fresh` | Ignora el progreso previo y empieza de cero | off |
 
 ## Salida
@@ -63,7 +53,7 @@ Los resultados se guardan en `output/dominio.com/` junto al propio script.
 | `1_subdomains.txt` | Subdominios encontrados |
 | `2_alive_hosts.txt` | Hosts que responden |
 | `2_skipped_redirects.txt` | Hosts descartados por redirect y el motivo |
-| `3_dork_urls.txt` | Endpoints encontrados por dorking |
 | `4_wayback_urls.txt` | Endpoints históricos (solo con `--wayback`) |
-| `5_live_endpoints.txt` | Endpoints que siguen activos |
+| `5_live_endpoints.txt` | Endpoints que siguen activos (solo con `--wayback`) |
 | `5_live_endpoints_status.tsv` | Los mismos endpoints con código y tamaño |
+| `dorks.txt` | Dorks de Google agrupados por categoría para revisar a mano |

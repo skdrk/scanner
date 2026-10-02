@@ -6,17 +6,8 @@ import shutil
 import subprocess
 import sys
 import threading
-import time
 from pathlib import Path
 from urllib.parse import urlsplit
-
-try:
-    from ddgs import DDGS
-except ImportError:
-    try:
-        from duckduckgo_search import DDGS
-    except ImportError:
-        DDGS = None
 
 STATIC_EXT = {
     "png", "jpg", "jpeg", "gif", "svg", "ico", "webp", "bmp", "tif", "tiff",
@@ -393,85 +384,96 @@ def step_alive_hosts(subs, out_dir, state, threads, timeout):
     return alive
 
 
-def step_dork(alive, out_dir, state, step_n, keep_static, max_results, pause, region, max_fails):
-    hosts = sorted({host_of(u) for u in alive if host_of(u)})
-    step_header(step_n, f" dorking (DuckDuckGo) · {len(hosts)} hosts")
-    out_f = out_dir / "3_dork_urls.txt"
-    done_f = out_dir / ".dork_hosts.txt"
+def build_dorks(domain, subs, alive, exclude_limit):
+    known = [s for s in subs if s != domain and s != f"www.{domain}"]
+    excl = " ".join(f"-site:{s}" for s in known[:exclude_limit])
+    alive_hosts = sorted({host_of(u) for u in alive if host_of(u)})
 
-    done_hosts = set(read_lines(done_f))
-    if hosts and set(hosts).issubset(done_hosts) and out_f.exists():
-        urls = read_lines(out_f)
-        resumed(f"reanudado: {len(urls)} endpoints ya guardados")
-        replay(urls)
-        return urls
+    sections = []
 
-    if DDGS is None:
-        warn("libreria 'ddgs' no instalada: pip install ddgs")
-        warn("se omite el dorking (se reintentara cuando este instalada).")
-        return read_lines(out_f)
+    disc = [
+        f"site:{domain}",
+        f"site:*.{domain}",
+    ]
+    if excl:
+        disc.append(f"site:*.{domain} {excl}")
+    sections.append(("Subdominios y descubrimiento", disc))
 
-    unique = set(read_lines(out_f))
-    pending = [h for h in hosts if h not in done_hosts]
-    if done_hosts:
-        resumed(f"{len(done_hosts)} hosts ya consultados, quedan {len(pending)}")
+    sections.append(("Ficheros expuestos", [
+        f"site:{domain} ext:pdf OR ext:doc OR ext:docx OR ext:xls OR ext:xlsx OR ext:ppt OR ext:pptx",
+        f"site:{domain} ext:txt OR ext:log OR ext:bak OR ext:old OR ext:sql OR ext:db",
+        f"site:{domain} ext:conf OR ext:config OR ext:env OR ext:ini OR ext:yml OR ext:yaml",
+        f"site:{domain} ext:zip OR ext:tar OR ext:gz OR ext:rar OR ext:7z OR ext:tgz",
+        f"site:{domain} ext:xml OR ext:json OR ext:csv",
+    ]))
 
-    prog = Progress(len(hosts), "hosts")
-    prog.update(n=len(done_hosts))
-    failed = 0
-    consecutive = 0
-    aborted = False
-    for h in pending:
-        before = len(unique)
-        ok = True
-        try:
-            results = DDGS().text(f"site:{h}", region=region, max_results=max_results)
-        except Exception as e:
-            warn(f"{h}: fallo en la consulta ({str(e)[:60]})")
-            results = []
-            ok = False
-            failed += 1
-            consecutive += 1
-        else:
-            consecutive = 0
-        for r in results:
-            u = r.get("href", "")
-            if not u.startswith(("http://", "https://")):
-                continue
-            if host_of(u) != h:
-                continue
-            if not keep_static:
-                ext = urlsplit(u).path.rsplit(".", 1)
-                if len(ext) == 2 and ext[1].lower() in STATIC_EXT:
-                    continue
-            unique.add(u)
-        gained = len(unique) - before
-        if gained:
-            found(f"{h}  {C.GREY}(+{gained} endpoints){C.RESET}")
-        write_lines(out_f, sorted(unique))
-        if ok:
-            done_hosts.add(h); write_lines(done_f, sorted(done_hosts))
-        prog.update()
-        if consecutive >= max_fails:
-            aborted = True
-            break
-        if pending and h != pending[-1]:
-            time.sleep(pause)
-    prog.done()
+    sections.append(("Listados de directorios", [
+        f'site:{domain} intitle:"index of"',
+        f'site:{domain} intext:"index of /" "parent directory"',
+    ]))
 
-    result = sorted(unique)
-    info(f"{C.BOLD}{len(result)}{C.RESET} endpoints encontrados")
+    sections.append(("Paneles y autenticacion", [
+        f"site:{domain} inurl:admin OR inurl:login OR inurl:signin OR inurl:dashboard OR inurl:portal",
+        f"site:{domain} inurl:auth OR inurl:sso OR inurl:oauth OR inurl:account",
+        f'site:{domain} intitle:"login" OR intitle:"admin" OR intitle:"panel"',
+    ]))
 
-    if aborted:
-        warn(f"abortado tras {consecutive} fallos seguidos (rate limit de DuckDuckGo).")
-        warn("Lo encontrado queda guardado. Relanza mas tarde (sube --dork-pause) "
-             "para continuar con los hosts restantes.")
-    elif failed:
-        warn(f"{failed} hosts fallaron (probable rate limit de DuckDuckGo).")
-        warn("Relanza el mismo dominio para reintentar solo esos (sube --dork-pause).")
+    sections.append(("APIs y documentacion", [
+        f"site:{domain} inurl:api OR inurl:api-docs OR inurl:swagger OR inurl:graphql OR inurl:openapi",
+        f"site:{domain} inurl:v1 OR inurl:v2 OR inurl:rest OR inurl:wp-json",
+    ]))
 
+    sections.append(("Configuracion y secretos", [
+        f"site:{domain} inurl:web.config OR inurl:.env OR inurl:config OR inurl:settings",
+        f'site:{domain} intext:"api_key" OR intext:"apikey" OR intext:"secret" OR intext:"password" OR intext:"token"',
+        f"site:{domain} ext:env OR ext:cfg OR ext:properties",
+    ]))
+
+    sections.append(("Parametros (posible inyeccion/redirect)", [
+        f'site:{domain} inurl:"?id=" OR inurl:"?page=" OR inurl:"?file=" OR inurl:"?path="',
+        f'site:{domain} inurl:"?url=" OR inurl:"?redirect=" OR inurl:"?return=" OR inurl:"?next="',
+        f'site:{domain} inurl:"?q=" OR inurl:"?search=" OR inurl:"?query="',
+    ]))
+
+    sections.append(("Errores y debug", [
+        f'site:{domain} intext:"sql syntax near" OR intext:"syntax error has occurred" OR intext:"Warning: mysql"',
+        f'site:{domain} intext:"stack trace" OR intext:"fatal error" OR intitle:"phpinfo()"',
+    ]))
+
+    sections.append(("Restos de desarrollo", [
+        f"site:{domain} inurl:test OR inurl:dev OR inurl:staging OR inurl:beta OR inurl:old OR inurl:backup",
+        f"site:{domain} inurl:.git OR inurl:.svn OR inurl:.DS_Store OR inurl:.well-known",
+    ]))
+
+    sections.append(("Credenciales en ficheros", [
+        f"site:{domain} ext:txt intext:password OR ext:log intext:password",
+        f"site:{domain} ext:sql intext:INSERT OR ext:sql intext:password",
+    ]))
+
+    if alive_hosts:
+        sections.append(("Por host vivo", [f"site:{h}" for h in alive_hosts]))
+
+    return sections
+
+
+def step_dorks(domain, subs, alive, out_dir, step_n, exclude_limit):
+    step_header(step_n, "dorks de Google para revisar a mano")
+    sections = build_dorks(domain, subs, alive, exclude_limit)
+    out_f = out_dir / "dorks.txt"
+
+    lines = []
+    for title, queries in sections:
+        _emit(f"\n   {C.BOLD}{C.MAGENTA}{title}{C.RESET}")
+        lines.append(f"# {title}")
+        for q in queries:
+            found(q)
+            lines.append(q)
+        lines.append("")
+
+    write_lines(out_f, lines)
+    _emit("")
     saved(out_f)
-    return result
+    return sections
 
 
 def step_wayback(alive, out_dir, state, step_n, keep_static):
@@ -604,10 +606,7 @@ def main():
     p.add_argument("--sf-timeout", type=int, default=10)
     p.add_argument("--no-all", action="store_true")
     p.add_argument("--wayback", action="store_true")
-    p.add_argument("--dork-max", type=int, default=50)
-    p.add_argument("--dork-pause", type=float, default=2.0)
-    p.add_argument("--dork-region", default="wt-wt")
-    p.add_argument("--dork-max-fails", type=int, default=2)
+    p.add_argument("--dork-exclude-limit", type=int, default=25)
     p.add_argument("--fresh", action="store_true")
     args = p.parse_args()
 
@@ -624,7 +623,7 @@ def main():
             f.unlink()
 
     state = load_state(out_dir)
-    TOTAL_STEPS = 5 if args.wayback else 4
+    TOTAL_STEPS = 5 if args.wayback else 3
 
     banner(domain)
     if state:
@@ -634,18 +633,17 @@ def main():
                           args.sf_maxtime, args.sf_timeout, not args.no_all)
     alive = step_alive_hosts(subs, out_dir, state, args.threads, args.timeout)
 
-    endpoints = set(step_dork(alive, out_dir, state, 3, args.keep_static,
-                              args.dork_max, args.dork_pause, args.dork_region,
-                              args.dork_max_fails))
+    final = []
     if args.wayback:
-        endpoints |= set(step_wayback(alive, out_dir, state, 4, args.keep_static))
+        endpoints = step_wayback(alive, out_dir, state, 3, args.keep_static)
+        final = step_alive_urls(sorted(set(endpoints)), out_dir, state, 4,
+                                args.threads, args.timeout, args.exclude_codes)
 
-    final_step = TOTAL_STEPS
-    final = step_alive_urls(sorted(endpoints), out_dir, state, final_step,
-                            args.threads, args.timeout, args.exclude_codes)
+    step_dorks(domain, subs, alive, out_dir, TOTAL_STEPS, args.dork_exclude_limit)
 
-    print(f"\n{C.BOLD}{C.GREEN}Hecho.{C.RESET} {len(final)} endpoints activos. "
-          f"Resultados en {C.BOLD}{out_dir}/{C.RESET}\n", file=sys.stderr)
+    print(f"\n{C.BOLD}{C.GREEN}Hecho.{C.RESET} {len(alive)} hosts vivos, "
+          f"{len(final)} endpoints activos. Resultados en {C.BOLD}{out_dir}/{C.RESET}\n",
+          file=sys.stderr)
 
 
 if __name__ == "__main__":
